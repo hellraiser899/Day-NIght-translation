@@ -3,6 +3,8 @@ from utils import *
 from ops import *
 import time
 from glob import glob
+# import imageio
+# import cv2
 def gaussian_noise_layer(input_layer, std):
     noise = tf.random_normal(shape=tf.shape(input_layer), mean=0.0, stddev=std, dtype=tf.float32)
     return input_layer+noise
@@ -20,8 +22,6 @@ def generator_resnet(image, options, reuse=False, name="generator"):
             return y + x
 
         ### Encoder architecture
-        # print("Orig Image shape")
-        # print(image.shape)
         c0 = tf.pad(image, [[0, 0], [3, 3], [3, 3], [0, 0]], "REFLECT")
         c1 = tf.nn.relu(instance_norm(conv2d(c0, options.gf_dim, 7, 1, padding='VALID', name='g_e1_c'), 'g_e1_bn'))
         c2 = tf.nn.relu(instance_norm(conv2d(c1, options.gf_dim * 2, 3, 2, name='g_e2_c'), 'g_e2_bn'))
@@ -42,17 +42,7 @@ def generator_resnet(image, options, reuse=False, name="generator"):
         d2 = deconv2d(d1, options.gf_dim, 3, 2, name='g_d2_dc')
         d2 = tf.nn.relu(instance_norm(d2, 'g_d2_bn'))
         d2 = tf.pad(d2, [[0, 0], [3, 3], [3, 3], [0, 0]], "REFLECT")
-        pred = tf.nn.tanh(conv2d(d2, options.output_c_dim+1, 7, 1, padding='VALID', name='g_pred_c'))
-        # print("Prediction Shape")
-        # print(pred.shape)
-        mask_trans = tf.math.sigmoid(pred[:, :, :, :1], name='g_mask_trans')
-        content_trans = pred[:, :, :, 1:]
-        mask_trans = tf.repeat(mask_trans, repeats=3, axis=3, name='g_mask_trans')
-        result_trans = content_trans*mask_trans + image*(1-mask_trans)
-        # print("Mask Shape")
-        # print(mask_trans.shape)
-        # print("Image Shape")
-        # print(result_trans.shape)
+        pred = tf.nn.tanh(conv2d(d2, options.output_c_dim, 7, 1, padding='VALID', name='g_pred_c'))
 
         ### reconstruction decoder architecture
         r5 = gaussian_noise_layer(r5, 0.02)
@@ -66,13 +56,9 @@ def generator_resnet(image, options, reuse=False, name="generator"):
         d2_rec = deconv2d(d1_rec, options.gf_dim, 3, 2, name='g_d2_dc_rec')
         d2_rec = tf.nn.relu(instance_norm(d2_rec, 'g_d2_bn_rec'))
         d2_rec = tf.pad(d2_rec, [[0, 0], [3, 3], [3, 3], [0, 0]], "REFLECT")
-        pred_rec = tf.nn.tanh(conv2d(d2_rec, options.output_c_dim+1, 7, 1, padding='VALID', name='g_pred_c_rec'))
-        mask_rec = tf.math.sigmoid(pred_rec[:, :, :, :1], name='g_mask_rec')
-        content_rec = pred_rec[:, :, :, 1:]
-        mask_rec = tf.repeat(mask_rec, repeats=3, axis=3, name='g_mask_rec')
-        result_rec = content_rec*mask_rec + image*(1-mask_rec)
+        pred_rec = tf.nn.tanh(conv2d(d2_rec, options.output_c_dim, 7, 1, padding='VALID', name='g_pred_c_rec'))
 
-        return result_trans,result_rec,r5,content_trans,content_rec,mask_trans,mask_rec
+        return pred,pred_rec,r5
 
 def domain_agnostic_classifier(percep,options, reuse=False,name="percep"):
     with tf.variable_scope(name):
@@ -122,7 +108,6 @@ class cyclegan(object):
         self.input_c_dim = args.input_nc
         self.output_c_dim = args.output_nc
         self.L1_lambda = args.L1_lambda
-        self.reg_lambda = args.L1_lambda
         self.dataset_dir = args.dataset_dir
         self.n_d = args.n_d
         self.n_scale = args.n_scale
@@ -165,7 +150,7 @@ class cyclegan(object):
             return images
 
     def _build_model(self):
-        self.real_data = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size,self.input_c_dim + self.output_c_dim],name='real_A_and_B_images')
+        self.real_data = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size*2,self.input_c_dim + self.output_c_dim],name='real_A_and_B_images')
 
         self.real_A = self.real_data[:, :, :, :self.input_c_dim]
         self.real_B = self.real_data[:, :, :, self.input_c_dim:self.input_c_dim + self.output_c_dim]
@@ -177,10 +162,10 @@ class cyclegan(object):
         self.A_label=tf.convert_to_tensor(A_label)
         self.B_label=tf.convert_to_tensor(B_label)
 
-        self.fake_B,self.rec_realA,self.realA_percep,_,_,self.mask_B_trans,self.mask_B_rec = self.generator(self.real_A, self.options, False, name="generatorA2B")
-        self.fake_A_,self.rec_fakeB,self.fakeB_percep,_,_,_,_ = self.generator(self.fake_B, self.options, False, name="generatorB2A")
-        self.fake_A,self.rec_realB,self.realB_percep,_,_,self.mask_A_trans,self.mask_A_rec = self.generator(self.real_B, self.options, True, name="generatorB2A")
-        self.fake_B_,self.rec_fakeA,self.fakeA_percep,_,_,_,_ = self.generator(self.fake_A, self.options, True, name="generatorA2B")
+        self.fake_B,self.rec_realA,self.realA_percep = self.generator(self.real_A, self.options, False, name="generatorA2B")
+        self.fake_A_,self.rec_fakeB,self.fakeB_percep = self.generator(self.fake_B, self.options, False, name="generatorB2A")
+        self.fake_A,self.rec_realB,self.realB_percep = self.generator(self.real_B, self.options, True, name="generatorB2A")
+        self.fake_B_,self.rec_fakeA,self.fakeA_percep = self.generator(self.fake_A, self.options, True, name="generatorA2B")
 
         self.realA_percep_logit =  self.domain_agnostic_classifier(self.realA_percep,self.options,  False,name="percep")
         self.realB_percep_logit =  self.domain_agnostic_classifier(self.realB_percep, self.options, True, name="percep")
@@ -191,27 +176,11 @@ class cyclegan(object):
         self.cls_loss = sce_criterion(self.realA_percep_logit,self.A_label)*0.25+sce_criterion(self.realB_percep_logit,self.B_label)*0.25\
                         +sce_criterion(self.fakeB_percep_logit,self.A_label)*0.25+sce_criterion(self.fakeA_percep_logit,self.B_label)*0.25
 
-        loss_reg_A_trans = tf.math.reduce_sum(tf.abs(self.mask_A_trans[:, :, :, :-1] - self.mask_A_trans[:, :, :, 1:]))\
-                         + tf.math.reduce_sum(tf.abs(self.mask_A_trans[:, :, :-1, :] - self.mask_A_trans[:, :, 1:, :]))
-
-        loss_reg_A_rec = tf.math.reduce_sum(tf.abs(self.mask_A_rec[:, :, :, :-1] - self.mask_A_rec[:, :, :, 1:]))\
-                         + tf.math.reduce_sum(tf.abs(self.mask_A_rec[:, :, :-1, :] - self.mask_A_rec[:, :, 1:, :]))
-
-        loss_reg_B_trans = tf.math.reduce_sum(tf.abs(self.mask_B_trans[:, :, :, :-1] - self.mask_B_trans[:, :, :, 1:]))\
-                         + tf.math.reduce_sum(tf.abs(self.mask_B_trans[:, :, :-1, :] - self.mask_B_trans[:, :, 1:, :]))
-
-        loss_reg_B_rec = tf.math.reduce_sum(tf.abs(self.mask_B_rec[:, :, :, :-1] - self.mask_B_rec[:, :, :, 1:]))\
-                         + tf.math.reduce_sum(tf.abs(self.mask_B_rec[:, :, :-1, :] - self.mask_B_rec[:, :, 1:, :]))
-
         self.g_adv_total=0.0
         self.g_adv = 0.0
         self.g_adv_rec = 0.0
         self.g_adv_recfake = 0.0
-        self.g_mask_reg = 0.0
         ### We switch to adopt the pixel-wise loss between the two latent codes after the reduce_mean operation
-
-        self.g_mask_reg = (loss_reg_A_trans + loss_reg_B_trans + loss_reg_A_rec + loss_reg_B_rec) * self.reg_lambda
-
         self.percep_loss = tf.reduce_mean(tf.abs(tf.reduce_mean(self.realA_percep,axis=3)-tf.reduce_mean(self.fakeB_percep,axis=3)))\
                            +tf.reduce_mean(tf.abs(tf.reduce_mean(self.realB_percep,axis=3)-tf.reduce_mean(self.fakeA_percep,axis=3)))
         for i in range(self.n_d):
@@ -241,17 +210,17 @@ class cyclegan(object):
         self.g_loss = self.g_adv_total+ self.L1_lambda * abs_criterion(self.real_A, self.fake_A_) \
                       + self.L1_lambda * abs_criterion(self.real_B, self.fake_B_)\
                       + self.L1_lambda * abs_criterion(self.rec_realA, self.real_A)\
-                      + self.L1_lambda * abs_criterion(self.rec_realB, self.real_B)+ self.percep_loss + self.g_cls_loss + self.g_mask_reg
+                      + self.L1_lambda * abs_criterion(self.rec_realB, self.real_B)+ self.percep_loss + self.g_cls_loss
 
         self.g_rec_real = abs_criterion(self.rec_realA, self.real_A) + abs_criterion(self.rec_realB, self.real_B)
         self.g_rec_cycle = abs_criterion(self.real_A, self.fake_A_) + abs_criterion(self.real_B, self.fake_B_)
 
-        self.fake_A_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size,  self.output_c_dim], name='fake_A_sample')
-        self.fake_B_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size,  self.output_c_dim], name='fake_B_sample')
-        self.rec_A_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size, self.output_c_dim],name='rec_A_sample')
-        self.rec_B_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size, self.output_c_dim],name='rec_B_sample')
-        self.rec_fakeA_sample = tf.placeholder(tf.float32, [self.batch_size, self.image_size, self.image_size,self.output_c_dim], name='rec_fakeA_sample')
-        self.rec_fakeB_sample = tf.placeholder(tf.float32, [self.batch_size, self.image_size, self.image_size,self.output_c_dim], name='rec_fakeB_sample')
+        self.fake_A_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size*2,  self.output_c_dim], name='fake_A_sample')
+        self.fake_B_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size*2,  self.output_c_dim], name='fake_B_sample')
+        self.rec_A_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size * 2, self.output_c_dim],name='rec_A_sample')
+        self.rec_B_sample = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size * 2, self.output_c_dim],name='rec_B_sample')
+        self.rec_fakeA_sample = tf.placeholder(tf.float32, [self.batch_size, self.image_size, self.image_size * 2,self.output_c_dim], name='rec_fakeA_sample')
+        self.rec_fakeB_sample = tf.placeholder(tf.float32, [self.batch_size, self.image_size, self.image_size * 2,self.output_c_dim], name='rec_fakeB_sample')
 
         self.d_loss_item=[]
         self.d_loss_item_rec = []
@@ -315,14 +284,14 @@ class cyclegan(object):
              self.d_loss_sum]
         )
 
-        self.test_A = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size,self.input_c_dim], name='test_A')
-        self.test_B = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size,self.output_c_dim], name='test_B')
+        self.test_A = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size*2,self.input_c_dim], name='test_A')
+        self.test_B = tf.placeholder(tf.float32,[self.batch_size, self.image_size, self.image_size*2,self.output_c_dim], name='test_B')
 
-        self.testB,self.rec_testA,_,_,_,_,_ = self.generator(self.test_A, self.options, True, name="generatorA2B")
-        self.rec_cycle_A,self.refine_testB,_,_,_,_,_ =self.generator(self.testB, self.options, True, name="generatorB2A")
+        self.testB,self.rec_testA,_ = self.generator(self.test_A, self.options, True, name="generatorA2B")
+        self.rec_cycle_A,self.refine_testB,_ =self.generator(self.testB, self.options, True, name="generatorB2A")
 
-        self.testA,self.rec_testB,_,_,_,_,_ = self.generator(self.test_B, self.options, True, name="generatorB2A")
-        self.rec_cycle_B, self.refine_testA,_,_,_,_,_ = self.generator(self.testA, self.options, True, name="generatorA2B")
+        self.testA,self.rec_testB,_ = self.generator(self.test_B, self.options, True, name="generatorB2A")
+        self.rec_cycle_B, self.refine_testA,_ = self.generator(self.testA, self.options, True, name="generatorA2B")
 
         t_vars = tf.trainable_variables()
 
@@ -392,8 +361,8 @@ class cyclegan(object):
                 print(" [!] Load failed...")
 
         for epoch in range(args.epoch):
-            dataA = glob('{}/*.*'.format(self.dataset_dir + '/trainA'))
-            dataB = glob('{}/*.*'.format(self.dataset_dir + '/trainB'))
+            dataA = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/trainA'))
+            dataB = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/trainB'))
             np.random.shuffle(dataA)
             np.random.shuffle(dataB)
             batch_idxs = min(min(len(dataA), len(dataB)), args.train_size) // self.batch_size
@@ -445,15 +414,13 @@ class cyclegan(object):
                 if np.mod(counter, args.print_freq) == 1:
                     self.sample_model(args.sample_dir, epoch, idx)
 
-                if np.mod(counter, args.save_freq) == 0:
+                if np.mod(counter, args.save_freq) == 2:
                     self.save(args.checkpoint_dir, counter)
 
     def save(self, checkpoint_dir, step):
-        print("save function entry")
         model_name = "cyclegan.model"
         model_dir = "%s_%s" % (self.dataset_dir, self.image_size)
-        # checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
-        checkpoint_dir = os.path.join(checkpoint_dir, 'checkpoints')
+        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
 
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
@@ -466,11 +433,9 @@ class cyclegan(object):
         print(" [*] Reading checkpoint...")
 
         model_dir = "%s_%s" % (self.dataset_dir, self.image_size)
-        # checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
-        checkpoint_dir = os.path.join(checkpoint_dir, 'checkpoints')
+        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
 
         ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
-                
         if ckpt and ckpt.model_checkpoint_path:
             ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
             self.saver.restore(self.sess, os.path.join(checkpoint_dir, ckpt_name))
@@ -479,8 +444,8 @@ class cyclegan(object):
             return False
 
     def sample_model(self, sample_dir, epoch, idx):
-        dataA = glob('{}/*.*'.format(self.dataset_dir + '/testA'))
-        dataB = glob('{}/*.*'.format(self.dataset_dir + '/CLEAR_val'))
+        dataA = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testA'))
+        dataB = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testB'))
         np.random.shuffle(dataA)
         np.random.shuffle(dataB)
         batch_files = list(zip(dataA[:self.batch_size], dataB[:self.batch_size]))
@@ -496,23 +461,23 @@ class cyclegan(object):
 
         merge_A = np.concatenate([real_B, fake_A,rec_B,rec_fakeA,rec_cycle_B], axis=2)
         merge_B = np.concatenate([real_A, fake_B,rec_A,rec_fakeB,rec_cycle_A], axis=2)
-        check_folder('{}/{:02d}'.format(sample_dir, epoch))
+        check_folder('./{}/{:02d}'.format(sample_dir, epoch))
         save_images(merge_A, [self.batch_size, 1],
-                    '{}/{:02d}/A_{:04d}.jpg'.format(sample_dir, epoch, idx))
+                    './{}/{:02d}/A_{:04d}.jpg'.format(sample_dir, epoch, idx))
         save_images(merge_B, [self.batch_size, 1],
-                    '{}/{:02d}/B_{:04d}.jpg'.format(sample_dir, epoch, idx))
+                    './{}/{:02d}/B_{:04d}.jpg'.format(sample_dir, epoch, idx))
 
     def test(self, args):
         """Test cyclegan"""
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
         if args.which_direction == 'AtoB':
-            sample_files = glob('{}/*.*'.format(self.dataset_dir + '/testA'))
+            sample_files = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testA'))
         elif args.which_direction == 'BtoA':
-            sample_files = glob('{}/*.*'.format(self.dataset_dir + '/testB'))
+            sample_files = glob('./datasets/{}/*.*'.format(self.dataset_dir + '/testB'))
         else:
             raise Exception('--which_direction must be AtoB or BtoA')
-
+        
         if self.load(args.checkpoint_dir):
             print(" [*] Load SUCCESS")
         else:
@@ -525,9 +490,6 @@ class cyclegan(object):
             sample_image = np.array(sample_image).astype(np.float32)
             image_path = os.path.join(args.test_dir,'{0}_{1}'.format(args.which_direction, os.path.basename(sample_file)))
             fake_img,refine_fake,rec_img,cycle_img = self.sess.run([out_var,refine_var,rec_var,cycle_var], feed_dict={in_var: sample_image})
-            # fake_A,fake_B,rec_A,rec_B,rec_fake_A,rec_fake_B,_,_,g_loss,gan_loss,g_rec_cycle,g_rec_real,percep,g_adv,g_adv_rec,g_adv_recfake,cls_loss,g_cls_loss,summary_str = self.sess.run(
-            #         [self.fake_A, self.fake_B,self.rec_realA,self.rec_realB,self.rec_fakeA,self.rec_fakeB, self.g_optim,self.p_optim,self.g_loss,self.g_adv_total,self.g_rec_cycle,self.g_rec_real,self.percep_loss,self.g_adv,self.g_adv_rec,self.g_adv_recfake,self.cls_loss,self.g_cls_loss,self.g_sum],
-            #         feed_dict={in_var: sample_image, self.lr: lr})
+            
             merge=np.concatenate([sample_image,fake_img,refine_fake,rec_img,cycle_img],axis=2)
-            # merge=np.concatenate([sample_image,fake_A,fake_B,rec_A,rec_B],axis=2)
             save_images(merge, [1, 1], image_path)
